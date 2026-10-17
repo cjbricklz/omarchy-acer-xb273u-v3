@@ -386,7 +386,18 @@ Panel {
 
           // Keeps the popup repainting while it is open (and only then), and
           // counts the frames the window really swaps to the screen.
-          FrameAnimation { running: root.opened }
+          FrameAnimation {
+            running: root.opened
+            onTriggered: pulse.rotation = (pulse.rotation + 1) % 360
+          }
+          // Nearly invisible, but changes every frame so the window must repaint.
+          Rectangle {
+            id: pulse
+            width: 2; height: 2
+            x: 0; y: 0
+            opacity: 0.02
+            color: root.bar.foreground
+          }
           Connections {
             target: fpsBadge.Window.window
             ignoreUnknownSignals: true
@@ -447,8 +458,9 @@ Panel {
             outline: true
 
             Text {
-              text: root.highPerformance ? "High performance · " + Math.round(root.performanceRate.hz)
-                                         : "Balanced · " + Math.round(root.balancedRate.hz)
+              text: !root.rateAvailable ? ""
+                    : root.highPerformance ? "High performance · " + Math.round(root.performanceRate.hz)
+                                           : "Balanced · " + Math.round(root.balancedRate.hz)
               color: root.bar.foreground
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.body
