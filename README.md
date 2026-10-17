@@ -1,4 +1,4 @@
-# Acer XB273U V3 for Omarchy
+# Acer Predator XB273U V3 (27-inch WQHD) for Omarchy
 
 ![The plugin's popup open on the Omarchy bar](preview.png)
 
