@@ -384,11 +384,13 @@ Panel {
             }
           }
 
-          // Counts a frame per paint while the popup is open; stops (and so
-          // stops forcing repaints) as soon as it closes.
-          FrameAnimation {
-            running: root.opened
-            onTriggered: root.framesSinceTick++
+          // Keeps the popup repainting while it is open (and only then), and
+          // counts the frames the window really swaps to the screen.
+          FrameAnimation { running: root.opened }
+          Connections {
+            target: fpsBadge.Window.window
+            ignoreUnknownSignals: true
+            function onFrameSwapped() { if (root.opened) root.framesSinceTick++ }
           }
           Timer {
             interval: 500
