@@ -32,6 +32,24 @@ Panel {
   property int gainG: 50
   property int gainB: 50
 
+  // Refresh rate, switched through Hyprland rather than DDC/CI. The Hyprland
+  // output (e.g. "DP-3") comes from `ddcutil detect`; "output" in shell.json wins.
+  readonly property string outputOverride: String(setting("output", ""))
+  property string detectedOutput: ""
+  readonly property string output: outputOverride !== "" ? outputOverride : detectedOutput
+  property var mon: null          // Model.parseMonitor result, null until read
+  // "balancedHz" picks the closest rate the monitor offers (default 60);
+  // "performanceHz" does the same, 0 meaning the highest.
+  readonly property var balancedRate: mon ? Model.nearestRate(mon.rates, Number(setting("balancedHz", 60))) : null
+  readonly property var performanceRate: mon ? Model.nearestRate(mon.rates, Number(setting("performanceHz", 0))) : null
+  readonly property bool rateAvailable: mon !== null && balancedRate !== null && performanceRate !== null
+                                        && balancedRate.hz !== performanceRate.hz
+  readonly property real refreshHz: mon ? mon.refresh : 0
+  readonly property bool highPerformance: rateAvailable
+      && Model.isHighPerformance(refreshHz, balancedRate.hz, performanceRate.hz)
+  // The rate asked for, until the next read confirms it.
+  property real requestedHz: 0
+
   // Coalescing writer: one slot per code, one ddcutil process at a time.
   property var pending: ({})
   property int inflightCode: -1
@@ -39,9 +57,11 @@ Panel {
   readonly property var switchCodes: [Model.VCP.preset]
 
   // Keyboard cursor: one entry per visible row.
-  readonly property var rows: ["brightness", "contrast", "preset", "gainR", "gainG", "gainB"]
+  readonly property var rows: (rateAvailable ? ["rate"] : []).concat(
+      ["brightness", "contrast", "preset", "gainR", "gainG", "gainB"])
   property string cursorRow: "brightness"
   property bool cursorActive: false
+  onRowsChanged: if (rows.indexOf(cursorRow) < 0) cursorRow = rows[0]
 
   function write(code, value) {
     pending = Model.enqueue(pending, code, value)
@@ -77,6 +97,23 @@ Panel {
   function refresh() {
     if (bus === "") detect()
     else if (!reader.running) reader.running = true
+    readMonitor()
+  }
+
+  function readMonitor() {
+    if (output !== "" && !monReader.running) monReader.running = true
+  }
+
+  // Applies the balanced or high-performance rate. Runtime only: it does not
+  // touch monitors.lua, so a Hyprland reload goes back to the configured rate.
+  function setHighPerformance(on) {
+    if (!rateAvailable || rateWriter.running) return
+    var rate = on ? performanceRate : balancedRate
+    var lua = Model.buildRateEval(mon, rate)
+    if (lua === "") return
+    requestedHz = rate.hz
+    rateWriter.command = ["hyprctl", "eval", lua]
+    rateWriter.running = true
   }
 
   function detect() {
@@ -87,9 +124,17 @@ Panel {
 
   function applyDetect(displays) {
     detectedBus = Model.pickBus(displays)
+    detectedOutput = ""
+    for (var i = 0; i < displays.length; i++)
+      if (displays[i].bus === bus) detectedOutput = displays[i].output
     if (bus === "") { status = "missing"; return }
     status = "silent"
     refresh()
+  }
+
+  function applyMonitor(m) {
+    mon = m
+    requestedHz = 0
   }
 
   function applyRead(s) {
@@ -115,8 +160,12 @@ Panel {
     for (var k = 0; k < P.length; k++) if (P[k].value === preset) i = k
     setPreset(P[Math.max(0, Math.min(P.length - 1, i + d))].value)
   }
+  function activate() {
+    if (cursorRow === "rate") setHighPerformance(!highPerformance)
+  }
   function adjust(d) {
     switch (cursorRow) {
+      case "rate": setHighPerformance(d > 0); break
       case "brightness": setBrightness(brightness + d * 5); break
       case "contrast": setContrast(contrast + d * 5); break
       case "preset": stepPreset(d); break
@@ -129,7 +178,10 @@ Panel {
   property real wheelAccumulator: 0
 
   function stateJson() {
-    return JSON.stringify({ brightness: brightness, contrast: contrast, preset: preset,
+    return JSON.stringify({ refreshHz: refreshHz, highPerformance: highPerformance,
+                            balancedHz: balancedRate ? balancedRate.hz : null,
+                            performanceHz: performanceRate ? performanceRate.hz : null,
+                            output: output, brightness: brightness, contrast: contrast, preset: preset,
                             gainR: gainR, gainG: gainG, gainB: gainB,
                             status: status, bus: bus, queued: Object.keys(pending).length })
   }
@@ -142,6 +194,7 @@ Panel {
       case "brightness": setBrightness(n); break
       case "contrast": setContrast(n); break
       case "preset": setPreset(n); break
+      case "performance": setHighPerformance(value === "on" || n === 1); break
       case "gain-r": setGainR(n); break
       case "gain-g": setGainG(n); break
       case "gain-b": setGainB(n); break
@@ -160,7 +213,8 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  Component.onCompleted: refresh()
+  // Always detect once: even with a "bus" override, detect supplies the Hyprland output.
+  Component.onCompleted: detect()
   onOpenedChanged: if (opened) {
     // A silent auto-detected bus may be stale (monitor moved ports), so look again.
     if (status === "silent" && busOverride === "") detectedBus = ""
@@ -190,6 +244,24 @@ Panel {
       onStreamFinished: root.applyRead(Model.parseBrief(text))
     }
   }
+
+  Process {
+    id: monReader
+    command: ["hyprctl", "monitors", "-j"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyMonitor(Model.parseMonitor(text, root.output))
+    }
+  }
+
+  Process {
+    id: rateWriter
+    stdout: StdioCollector { waitForEnd: true }
+    onRunningChanged: if (!running) rateSettle.restart()
+  }
+
+  // Hyprland needs a moment to finish the modeset before it reports the new rate.
+  Timer { id: rateSettle; interval: 700; onTriggered: root.readMonitor() }
 
   Process {
     id: writer
@@ -228,6 +300,7 @@ Panel {
         if (dy !== 0) root.moveCursor(dy)
         else if (dx !== 0) root.adjust(dx)
       }
+      onActivateRequested: if (root.cursorActive) root.activate()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -272,6 +345,75 @@ Panel {
               font.pixelSize: Style.font.caption
               font.bold: true
               font.letterSpacing: 1.2
+            }
+          }
+        }
+
+        Column {
+          visible: root.rateAvailable
+          width: parent.width
+          spacing: Style.space(12)
+
+          PanelSeparator { foreground: root.bar.foreground }
+
+          Item {
+            width: parent.width
+            implicitHeight: rateHeader.implicitHeight
+            PanelSectionHeader {
+              id: rateHeader
+              text: "󰍹  REFRESH RATE"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              text: root.requestedHz > 0 ? "→ " + Math.round(root.requestedHz) + " FPS"
+                                         : Math.round(root.refreshHz) + " FPS"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          CursorSurface {
+            id: rateRow
+            width: parent.width
+            implicitHeight: rateSwitch.implicitHeight + Style.spacing.controlGap
+            hasCursor: root.cursorActive && root.cursorRow === "rate"
+            foreground: root.bar.foreground
+            outline: true
+
+            Text {
+              text: root.highPerformance ? "High performance · " + Math.round(root.performanceRate.hz)
+                                         : "Balanced · " + Math.round(root.balancedRate.hz)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            ToggleSwitch {
+              id: rateSwitch
+              checked: root.highPerformance
+              foreground: root.bar.foreground
+              cursorRing: false
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              onToggled: root.setHighPerformance(!root.highPerformance)
+            }
+            MouseArea {
+              anchors.fill: parent
+              anchors.rightMargin: rateSwitch.width + Style.space(6)
+              hoverEnabled: true
+              onContainsMouseChanged: if (containsMouse) { root.cursorActive = true; root.cursorRow = "rate" }
+              onClicked: root.setHighPerformance(!root.highPerformance)
             }
           }
         }

@@ -71,6 +71,7 @@ function takeNext(pending) {
 // with an I2C bus. Blocks look like:
 //   Display 1
 //      I2C bus:  /dev/i2c-9
+//      DRM connector:  card1-DP-3
 //      Monitor:  ACR:XB273U V3:<serial>
 function parseDetect(text) {
   var out = []
@@ -79,7 +80,10 @@ function parseDetect(text) {
     var bus = /I2C bus:\s*\/dev\/i2c-(\d+)/.exec(blocks[i])
     if (!bus) continue
     var mon = /Monitor:\s*([^:\n]*):([^:\n]*)/.exec(blocks[i])
-    out.push({ bus: bus[1], mfg: mon ? mon[1].trim() : "", model: mon ? mon[2].trim() : "" })
+    // "card1-DP-3" -> Hyprland's output name "DP-3"
+    var conn = /DRM[ _]connector:\s*card\d+-(\S+)/i.exec(blocks[i])
+    out.push({ bus: bus[1], mfg: mon ? mon[1].trim() : "", model: mon ? mon[2].trim() : "",
+               output: conn ? conn[1] : "" })
   }
   return out
 }
@@ -91,6 +95,59 @@ function pickBus(displays) {
   for (var j = 0; j < displays.length; j++)
     if (displays[j].mfg === "ACR") return displays[j].bus
   return ""
+}
+
+// Finds the Hyprland output `name` in `hyprctl monitors -j` and returns what is
+// needed to re-apply it at another refresh rate: the geometry to keep, the
+// current rate, and the rates the monitor offers at the current resolution.
+// Each rate keeps the exact mode text Hyprland lists ("2560x1440@59.95Hz").
+function parseMonitor(text, name) {
+  var list
+  try { list = JSON.parse(String(text || "")) } catch (e) { return null }
+  if (!Array.isArray(list)) return null
+  for (var i = 0; i < list.length; i++) {
+    var m = list[i]
+    if (m.name !== name) continue
+    var prefix = m.width + "x" + m.height + "@"
+    var rates = []
+    for (var j = 0; j < (m.availableModes || []).length; j++) {
+      var mode = String(m.availableModes[j])
+      if (mode.indexOf(prefix) !== 0) continue
+      rates.push({ hz: parseFloat(mode.slice(prefix.length)), mode: mode.replace(/Hz$/, "") })
+    }
+    rates.sort(function(a, b) { return b.hz - a.hz })
+    return { name: m.name, width: m.width, height: m.height, x: m.x, y: m.y, scale: m.scale,
+             transform: m.transform, refresh: m.refreshRate, rates: rates }
+  }
+  return null
+}
+
+// The rate in `rates` closest to `want`; the highest when `want` is 0 or less.
+function nearestRate(rates, want) {
+  if (!rates.length) return null
+  if (!(want > 0)) return rates[0]
+  var best = rates[0]
+  for (var i = 1; i < rates.length; i++)
+    if (Math.abs(rates[i].hz - want) < Math.abs(best.hz - want)) best = rates[i]
+  return best
+}
+
+// True when `refresh` is nearer the high-performance rate than the balanced one.
+function isHighPerformance(refresh, balanced, performance) {
+  return Math.abs(refresh - performance) < Math.abs(refresh - balanced)
+}
+
+// Lua for `hyprctl eval` that applies `rate` to `mon`, keeping its position,
+// scale and rotation. Returns "" when anything is not a plain value, because
+// the monitor name ends up inside a Lua string.
+function buildRateEval(mon, rate) {
+  if (!mon || !rate) return ""
+  if (!/^[A-Za-z0-9._-]+$/.test(mon.name)) return ""
+  if (!/^\d+x\d+@[0-9.]+$/.test(rate.mode)) return ""
+  var nums = [mon.x, mon.y, mon.scale, mon.transform]
+  for (var i = 0; i < nums.length; i++) if (typeof nums[i] !== "number" || !isFinite(nums[i])) return ""
+  return 'hl.monitor({ output = "' + mon.name + '", mode = "' + rate.mode + '", position = "' +
+         mon.x + "x" + mon.y + '", scale = ' + mon.scale + ", transform = " + mon.transform + " })"
 }
 
 function presetLabel(value) {
@@ -106,5 +163,7 @@ function hex(code) {
 if (typeof module !== "undefined") {
   module.exports = { VCP: VCP, PRESETS: PRESETS, clamp: clamp, parseBrief: parseBrief,
                      parseDetect: parseDetect, pickBus: pickBus, presetLabel: presetLabel,
+                     parseMonitor: parseMonitor, nearestRate: nearestRate,
+                     isHighPerformance: isHighPerformance, buildRateEval: buildRateEval,
                      enqueue: enqueue, takeNext: takeNext, hex: hex }
 }
