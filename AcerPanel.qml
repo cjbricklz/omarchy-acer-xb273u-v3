@@ -50,6 +50,13 @@ Panel {
   // The rate asked for, until the next read confirms it.
   property real requestedHz: 0
 
+  // Live FPS: how many frames the open popup actually paints per second.
+  // Painting is vsync-locked, so this follows the monitor's refresh rate. It
+  // is not a game or desktop frame counter.
+  property int measuredFps: 0
+  property int framesSinceTick: 0
+  property real lastTickMs: 0
+
   // Coalescing writer: one slot per code, one ddcutil process at a time.
   property var pending: ({})
   property int inflightCode: -1
@@ -179,6 +186,7 @@ Panel {
 
   function stateJson() {
     return JSON.stringify({ refreshHz: refreshHz, highPerformance: highPerformance,
+                            measuredFps: measuredFps,
                             balancedHz: balancedRate ? balancedRate.hz : null,
                             performanceHz: performanceRate ? performanceRate.hz : null,
                             output: output, brightness: brightness, contrast: contrast, preset: preset,
@@ -218,7 +226,7 @@ Panel {
   onOpenedChanged: if (opened) {
     // A silent auto-detected bus may be stale (monitor moved ports), so look again.
     if (status === "silent" && busOverride === "") detectedBus = ""
-    refresh(); cursorActive = false; cursorRow = "brightness"
+    refresh(); cursorActive = false; cursorRow = "brightness"; measuredFps = 0
   }
 
   Timer { interval: 5000; repeat: true; running: root.opened; onTriggered: root.refresh() }
@@ -290,7 +298,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(760))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -325,7 +333,8 @@ Panel {
             id: heroText
             anchors.left: heroIcon.right
             anchors.leftMargin: Style.space(14)
-            anchors.right: parent.right
+            anchors.right: fpsBadge.left
+            anchors.rightMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
             Text {
@@ -345,6 +354,53 @@ Panel {
               font.pixelSize: Style.font.caption
               font.bold: true
               font.letterSpacing: 1.2
+            }
+          }
+
+          // Live FPS counter, top right.
+          Column {
+            id: fpsBadge
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(6)
+            anchors.top: parent.top
+            visible: root.opened && root.measuredFps > 0
+            spacing: Style.space(2)
+            Text {
+              anchors.right: parent.right
+              text: String(root.measuredFps)
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            Text {
+              anchors.right: parent.right
+              text: "FPS"
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+            }
+          }
+
+          // Counts a frame per paint while the popup is open; stops (and so
+          // stops forcing repaints) as soon as it closes.
+          FrameAnimation {
+            running: root.opened
+            onTriggered: root.framesSinceTick++
+          }
+          Timer {
+            interval: 500
+            repeat: true
+            running: root.opened
+            onRunningChanged: if (running) { root.framesSinceTick = 0; root.lastTickMs = Date.now() }
+            onTriggered: {
+              var now = Date.now()
+              var seconds = (now - root.lastTickMs) / 1000
+              if (seconds > 0) root.measuredFps = Math.round(root.framesSinceTick / seconds)
+              root.framesSinceTick = 0
+              root.lastTickMs = now
             }
           }
         }
