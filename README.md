@@ -1,5 +1,7 @@
 # Acer XB273U V3 for Omarchy
 
+![The plugin's popup open on the Omarchy bar](preview.png)
+
 An Omarchy bar widget that controls an Acer Nitro XB273U V3 over DDC/CI. Click the sun icon in the bar to open its popup. Scrolling on the icon changes brightness.
 
 - **Brightness**, 0 to 100.
@@ -18,16 +20,14 @@ If `ddcutil detect` lists your monitor, you are set. If the command is missing, 
 
 ## Install
 
-From a local checkout:
-
 ```sh
-omarchy plugin add /path/to/omarchy-acer-xb273u-v3 --enable
+omarchy plugin add https://github.com/cjbricklz/omarchy-acer-xb273u-v3 --enable
 ```
 
-Or, once it is published:
+To update it to the latest version:
 
 ```sh
-omarchy plugin add https://github.com/<owner>/omarchy-acer-xb273u-v3 --enable
+omarchy plugin update puck.acer-xb273u-v3
 ```
 
 To remove it:
