@@ -28,6 +28,10 @@ Panel {
   property int brightness: 0
   property int contrast: 0
   property int preset: 0
+  // Brightness and contrast move together while linked (the default).
+  property bool linked: setting("linked", true) !== false
+  // What the bar shows: the shared value when linked, otherwise the average.
+  readonly property int combined: linked ? brightness : Math.round((brightness + contrast) / 2)
   property int gainR: 50
   property int gainG: 50
   property int gainB: 50
@@ -65,7 +69,7 @@ Panel {
 
   // Keyboard cursor: one entry per visible row.
   readonly property var rows: (rateAvailable ? ["rate"] : []).concat(
-      ["brightness", "contrast", "preset", "gainR", "gainG", "gainB"])
+      ["link", "brightness", "contrast", "preset", "gainR", "gainG", "gainB"])
   property string cursorRow: "brightness"
   property bool cursorActive: false
   onRowsChanged: if (rows.indexOf(cursorRow) < 0) cursorRow = rows[0]
@@ -94,8 +98,19 @@ Panel {
     return inflightCode === code || pending[code] !== undefined
   }
 
-  function setBrightness(v) { brightness = Model.clamp(v, 0, 100); write(Model.VCP.brightness, brightness) }
-  function setContrast(v)   { contrast = Model.clamp(v, 0, 100); write(Model.VCP.contrast, contrast) }
+  function setBrightness(v) {
+    brightness = Model.clamp(v, 0, 100); write(Model.VCP.brightness, brightness)
+    if (linked && contrast !== brightness) { contrast = brightness; write(Model.VCP.contrast, contrast) }
+  }
+  function setContrast(v) {
+    contrast = Model.clamp(v, 0, 100); write(Model.VCP.contrast, contrast)
+    if (linked && brightness !== contrast) { brightness = contrast; write(Model.VCP.brightness, brightness) }
+  }
+  // Linking pulls contrast to the current brightness straight away.
+  function setLinked(on) {
+    linked = on
+    if (on) setBrightness(brightness)
+  }
   function setPreset(v)     { preset = v; write(Model.VCP.preset, v) }
   function setGainR(v)      { gainR = Model.clamp(v, 0, 100); write(Model.VCP.gainR, gainR) }
   function setGainG(v)      { gainG = Model.clamp(v, 0, 100); write(Model.VCP.gainG, gainG) }
@@ -169,10 +184,12 @@ Panel {
   }
   function activate() {
     if (cursorRow === "rate") setHighPerformance(!highPerformance)
+    else if (cursorRow === "link") setLinked(!linked)
   }
   function adjust(d) {
     switch (cursorRow) {
       case "rate": setHighPerformance(d > 0); break
+      case "link": setLinked(d > 0); break
       case "brightness": setBrightness(brightness + d * 5); break
       case "contrast": setContrast(contrast + d * 5); break
       case "preset": stepPreset(d); break
@@ -189,7 +206,7 @@ Panel {
                             measuredFps: measuredFps,
                             balancedHz: balancedRate ? balancedRate.hz : null,
                             performanceHz: performanceRate ? performanceRate.hz : null,
-                            output: output, brightness: brightness, contrast: contrast, preset: preset,
+                            output: output, linked: linked, combined: combined, brightness: brightness, contrast: contrast, preset: preset,
                             gainR: gainR, gainG: gainG, gainB: gainB,
                             status: status, bus: bus, queued: Object.keys(pending).length })
   }
@@ -202,6 +219,7 @@ Panel {
       case "brightness": setBrightness(n); break
       case "contrast": setContrast(n); break
       case "preset": setPreset(n); break
+      case "linked": setLinked(value === "on" || n === 1); break
       case "performance": setHighPerformance(value === "on" || n === 1); break
       case "gain-r": setGainR(n); break
       case "gain-g": setGainG(n); break
@@ -277,11 +295,14 @@ Panel {
     onRunningChanged: if (!running) root.pump()
   }
 
-  BarIconButton {
+  // Icon plus the combined brightness/contrast percentage.
+  WidgetButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.status === "missing" ? "󰶐" : "󰃞"
+    fontSize: Style.bar.iconFont
+    text: root.status === "missing" ? "󰶐"
+          : "󰃞" + (root.ready ? (button.vertical ? "\n" : " ") + root.combined + "%" : "")
     onPressed: function(b) { root.toggle() }
     onWheelMoved: function(delta) {
       var wheel = Util.wheelSteps(root.wheelAccumulator, delta)
@@ -495,14 +516,49 @@ Panel {
 
           PanelSeparator { foreground: root.bar.foreground }
 
+          CursorSurface {
+            width: parent.width
+            implicitHeight: linkSwitch.implicitHeight + Style.spacing.controlGap
+            hasCursor: root.cursorActive && root.cursorRow === "link"
+            foreground: root.bar.foreground
+            outline: true
+
+            Text {
+              text: "󰌷  Link brightness & contrast"
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            ToggleSwitch {
+              id: linkSwitch
+              checked: root.linked
+              foreground: root.bar.foreground
+              cursorRing: false
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              onToggled: root.setLinked(!root.linked)
+            }
+            MouseArea {
+              anchors.fill: parent
+              anchors.rightMargin: linkSwitch.width + Style.space(6)
+              hoverEnabled: true
+              onContainsMouseChanged: if (containsMouse) { root.cursorActive = true; root.cursorRow = "link" }
+              onClicked: root.setLinked(!root.linked)
+            }
+          }
+
           SliderRow {
-            row: "brightness"; icon: "󰃠"; label: "BRIGHTNESS"
+            row: "brightness"; icon: "󰃠"; label: "BRIGHTNESS"; ruler: true
             minimum: 0; maximum: 100; value: root.brightness; suffix: "%"
             onPicked: function(v) { root.setBrightness(v) }
           }
 
           SliderRow {
-            row: "contrast"; icon: "󰆕"; label: "CONTRAST"
+            row: "contrast"; icon: "󰆕"; label: "CONTRAST"; ruler: true
             minimum: 0; maximum: 100; value: root.contrast; suffix: "%"
             onPicked: function(v) { root.setContrast(v) }
           }
@@ -598,6 +654,8 @@ Panel {
     property real minimum: 0
     property real maximum: 100
     property int ticks: 0
+    // Ruler behind the slider: a notch every 5, taller ones every 25, numbers at 25/50/75.
+    property bool ruler: false
     property int value: 0
     property string suffix: ""
     property string valueText: String(Math.round(slider.dragging ? slider.liveValue : value)) + suffix
@@ -631,14 +689,71 @@ Panel {
 
     CursorSurface {
       width: parent.width
-      height: slider.implicitHeight + Style.spacing.controlGap
+      height: slider.implicitHeight + Style.spacing.controlGap + (sr.ruler ? rulerLabels.height : 0)
       hasCursor: root.cursorActive && root.cursorRow === sr.row
       foreground: root.bar.foreground
       outline: true
+      Item {
+        id: rulerMarks
+        visible: sr.ruler
+        anchors.top: parent.top
+        anchors.topMargin: Style.spacing.controlGap / 2
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Style.space(6)
+        anchors.rightMargin: Style.space(6)
+        height: slider.implicitHeight
+
+        Repeater {
+          model: sr.ruler ? 19 : 0   // 5% .. 95%
+          Rectangle {
+            required property int index
+            readonly property int pct: (index + 1) * 5
+            readonly property bool major: pct % 25 === 0
+            width: Math.max(1, Style.space(major ? 2 : 1))
+            height: major ? Style.space(14) : Style.space(8)
+            color: root.bar.foreground
+            opacity: major ? 0.55 : 0.3
+            anchors.verticalCenter: parent.verticalCenter
+            x: parent.width * pct / 100 - width / 2
+          }
+        }
+      }
+
+      Item {
+        id: rulerLabels
+        visible: sr.ruler
+        height: sr.ruler ? labelProbe.implicitHeight + Style.space(2) : 0
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: Style.space(6)
+        anchors.rightMargin: Style.space(6)
+        anchors.top: rulerMarks.bottom
+        anchors.topMargin: -Style.space(4)
+
+        Text { id: labelProbe; visible: false; text: "0"; font.family: root.bar.fontFamily; font.pixelSize: Style.font.caption }
+        Repeater {
+          model: sr.ruler ? [25, 50, 75] : []
+          Text {
+            required property int modelData
+            text: String(modelData)
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            x: parent.width * modelData / 100 - width / 2
+          }
+        }
+      }
+
       PanelSlider {
         id: slider
         bar: root.bar
-        anchors.fill: parent
+        anchors.top: parent.top
+        anchors.topMargin: Style.spacing.controlGap / 2
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: implicitHeight
         anchors.leftMargin: Style.space(6)
         anchors.rightMargin: Style.space(6)
         minimum: sr.minimum
@@ -650,6 +765,33 @@ Panel {
         // Instant: every move is written; the queue drops superseded values.
         onMoved: function(v) { if (Math.round(v) !== sr.value) sr.picked(Math.round(v)) }
         onReleased: function(v) { if (Math.round(v) !== sr.value) sr.picked(Math.round(v)) }
+      }
+      // Click a ruler notch or a 25/50/75 label to jump there; anything else falls through to the slider.
+      MouseArea {
+        id: rulerHit
+        visible: sr.ruler
+        enabled: sr.ruler
+        anchors.fill: parent
+        z: 2
+        function pctAt(mx, my) {
+          var rx = mx - rulerMarks.x
+          var pct = rx / rulerMarks.width * 100
+          var tol = Style.space(5)
+          if (my >= rulerMarks.y && my <= rulerMarks.y + rulerMarks.height) {
+            var snapped = Math.round(pct / 5) * 5
+            if (snapped >= 5 && snapped <= 95 && Math.abs(rx - rulerMarks.width * snapped / 100) <= tol) return snapped
+          } else if (my > rulerMarks.y + rulerMarks.height && my <= rulerLabels.y + rulerLabels.height) {
+            var label = Math.round(pct / 25) * 25
+            if (label >= 25 && label <= 75 && Math.abs(rx - rulerMarks.width * label / 100) <= Style.space(12)) return label
+          }
+          return -1
+        }
+        onPressed: function(mouse) {
+          var pct = pctAt(mouse.x, mouse.y)
+          if (pct < 0) { mouse.accepted = false; return }
+          var v = Math.round(sr.minimum + pct / 100 * (sr.maximum - sr.minimum))
+          if (v !== sr.value) sr.picked(v)
+        }
       }
       HoverHandler { onHoveredChanged: if (hovered) { root.cursorActive = true; root.cursorRow = sr.row } }
     }
